@@ -22,6 +22,7 @@ import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.tavla_policy as tavla_policy
+import openpi.policies.eley_tavla_policy as eley_tavla_policy
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
@@ -509,6 +510,78 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotEleyTavlaDataConfig(LeRobotTavlaDataConfig):
+    """ELEY (16-dim) variant of LeRobotTavlaDataConfig for UNILATERAL data.
+
+    Differences vs the ALOHA-default parent:
+    - action is split across 4 trajectory-controller features (per-part), concatenated
+      to a single 16-dim action inside ELEYTavlaInputs (not a single `action` column).
+    - state/effort are GoMa-18 raw; ELEYTavlaInputs drops scapula -> 16.
+    - delta mask is make_bool_mask(7, -1, 7, -1) for [L_arm7, L_grip, R_arm7, R_grip].
+    Use with pi0.Pi0Config(effort_dim=16).
+    """
+
+    action_sequence_keys: Sequence[str] = (
+        "action.left_arm",
+        "action.right_arm",
+        "action.left_gripper",
+        "action.right_gripper",
+    )
+
+    def __post_init__(self):
+        images = {
+            "cam_high": "observation.images.cam_high",
+            "cam_left_wrist": "observation.images.cam_left_wrist",
+            "cam_right_wrist": "observation.images.cam_right_wrist",
+        }
+        repack_dict = {
+            "images": images,
+            "state": "observation.state",
+            "action.left_arm": "action.left_arm",
+            "action.right_arm": "action.right_arm",
+            "action.left_gripper": "action.left_gripper",
+            "action.right_gripper": "action.right_gripper",
+        }
+        if self.default_prompt is None:
+            repack_dict["prompt"] = "prompt"
+        if self.effort_history:
+            repack_dict["effort"] = "observation.effort"
+        object.__setattr__(
+            self,
+            "repack_transforms",
+            _transforms.Group(inputs=[_transforms.RepackTransform(repack_dict)]),
+        )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[eley_tavla_policy.ELEYTavlaInputs(action_dim=model_config.action_dim)],
+            outputs=[eley_tavla_policy.ELEYTavlaOutputs()],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)  # arms delta, grippers absolute
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        if self.default_prompt and isinstance(self.repo_id, list):
+            raise ValueError("Using default prompt when using multiple dataset is incorrect.")
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+            effort_history=self.effort_history,
+            prompt_from_task=(self.default_prompt is None),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -860,6 +933,46 @@ _CONFIGS = [
 
             base_config=DataConfig(
                 local_files_only=True, # Set to True for local-only datasets.
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # ELEY (16-dim, unilateral) TA-VLA configs. effort_dim=16. Dataset built by
+    # rebake config/{robot_model,pipeline}/eley_tavla_unilateral.yaml.
+    #
+    TrainConfig(
+        name="pi0_eley_tavla_effort",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            effort_history=(0,),
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_history",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            effort_history=tuple((4*i-36 for i in range(10))),  # sample 10 frames in 2s
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
