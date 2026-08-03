@@ -516,8 +516,11 @@ class LeRobotEleyTavlaDataConfig(LeRobotTavlaDataConfig):
     Differences vs the ALOHA-default parent:
     - action is split across 4 trajectory-controller features (per-part), concatenated
       to a single 16-dim action inside ELEYTavlaInputs (not a single `action` column).
-    - state/effort are GoMa-18 raw; ELEYTavlaInputs drops scapula -> 16.
-    - delta mask is make_bool_mask(7, -1, 7, -1) for [L_arm7, L_grip, R_arm7, R_grip].
+    - state/effort are GoMa-18 raw; ELEYTavlaInputs selects 16 of 18 dims.
+    - include_scapula=False (default): 16 = [L_arm7, L_grip, R_arm7, R_grip]
+      (scapula dropped), delta mask make_bool_mask(7, -1, 7, -1).
+    - include_scapula=True: 16 = [L_arm8, R_arm8] (scapula included, grippers
+      dropped and never commanded), delta mask make_bool_mask(16).
     Use with pi0.Pi0Config(effort_dim=16).
     """
 
@@ -527,8 +530,11 @@ class LeRobotEleyTavlaDataConfig(LeRobotTavlaDataConfig):
         "action.left_gripper",
         "action.right_gripper",
     )
+    include_scapula: bool = False
 
     def __post_init__(self):
+        if self.include_scapula:
+            object.__setattr__(self, "action_sequence_keys", ("action.left_arm", "action.right_arm"))
         images = {
             "cam_high": "observation.images.cam_high",
             "cam_left_wrist": "observation.images.cam_left_wrist",
@@ -537,11 +543,9 @@ class LeRobotEleyTavlaDataConfig(LeRobotTavlaDataConfig):
         repack_dict = {
             "images": images,
             "state": "observation.state",
-            "action.left_arm": "action.left_arm",
-            "action.right_arm": "action.right_arm",
-            "action.left_gripper": "action.left_gripper",
-            "action.right_gripper": "action.right_gripper",
         }
+        for key in self.action_sequence_keys:
+            repack_dict[key] = key
         if self.default_prompt is None:
             repack_dict["prompt"] = "prompt"
         if self.effort_history:
@@ -555,11 +559,14 @@ class LeRobotEleyTavlaDataConfig(LeRobotTavlaDataConfig):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[eley_tavla_policy.ELEYTavlaInputs(action_dim=model_config.action_dim)],
+            inputs=[eley_tavla_policy.ELEYTavlaInputs(action_dim=model_config.action_dim, include_scapula=self.include_scapula)],
             outputs=[eley_tavla_policy.ELEYTavlaOutputs()],
         )
         if self.use_delta_joint_actions:
-            delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)  # arms delta, grippers absolute
+            if self.include_scapula:
+                delta_action_mask = _transforms.make_bool_mask(16)  # all arm joints (incl. scapula) delta
+            else:
+                delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)  # arms delta, grippers absolute
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -1023,6 +1030,106 @@ _CONFIGS = [
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C_FUT, effort_dim=16),
         data=LeRobotEleyTavlaDataConfig(
             repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            effort_history=tuple((4*i-36 for i in range(10))),  # sample 10 frames in 2s
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # Scapula variants: action/state/effort 16 dims = [L_arm8, R_arm8] (scapula
+    # included, grippers excluded). Norm stats are NOT shareable with the
+    # non-scap configs — recompute per config.
+    #
+    TrainConfig(
+        name="pi0_eley_tavla_baseline_scap",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            include_scapula=True,
+            effort_history=(),
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_scap",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            include_scapula=True,
+            effort_history=(0,),
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_history_scap",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            include_scapula=True,
+            effort_history=tuple((4*i-36 for i in range(10))),  # sample 10 frames in 2s
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_fut_scap",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_FUT, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            include_scapula=True,
+            effort_history=(0,),  # input token is not built for EXPERT_FUT; futures are appended by the data loader
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_history_fut_scap",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C_FUT, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            include_scapula=True,
             effort_history=tuple((4*i-36 for i in range(10))),  # sample 10 frames in 2s
             default_prompt="do something",
             base_config=DataConfig(

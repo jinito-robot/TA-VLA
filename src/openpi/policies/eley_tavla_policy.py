@@ -11,9 +11,14 @@ Raw dataset dims (from rebake config/robot_model/eley_tavla_unilateral.yaml):
 - action.left_gripper/right_gripper : [1] each
 
 GoMa-18 order: [51..58 (L arm, 51=scapula), 61 (L grip), 71..78 (R arm, 71=scapula), 81 (R grip)].
-We drop the two fixed scapula axes (idx 0, 9) -> 16, kept INTERLEAVED as
-[L_arm7, L_grip, R_arm7, R_grip] so it lines up with the delta mask make_bool_mask(7,-1,7,-1)
-and with the trajectory-controller action parts.
+
+Two 18->16 variants, selected by `include_scapula`:
+- include_scapula=False (default, original): drop the scapula axes (idx 0, 9) ->
+  [L_arm7, L_grip, R_arm7, R_grip], delta mask make_bool_mask(7,-1,7,-1).
+- include_scapula=True: keep scapula, drop the grippers (idx 8, 17) ->
+  [L_arm8, R_arm8] (scapula first per arm, matching the trajectory-controller
+  order), delta mask make_bool_mask(16). Grippers are never commanded; the
+  deploy side holds them at their init-pose value.
 """
 
 import dataclasses
@@ -26,6 +31,9 @@ from openpi import transforms
 # Indices kept when converting a GoMa-18 vector to ELEY-16 (drop scapula at 0 and 9).
 # Result order: [L_arm 1..7, L_grip 8, R_arm 10..16, R_grip 17].
 _GOMA18_TO16 = (1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17)
+# Scapula variant: keep scapula (idx 0, 9), drop the grippers (idx 8, 17).
+# Result order: [L_arm 0..7, R_arm 9..16] (scapula first per arm).
+_GOMA18_TO16_SCAP = (0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16)
 
 
 def _parse_image(image) -> np.ndarray:
@@ -61,9 +69,13 @@ class ELEYTavlaInputs(transforms.DataTransformFn):
 
     # The action dimension of the model. Will be used to pad state and actions.
     action_dim: int
+    # False: [L_arm7, L_grip, R_arm7, R_grip] (scapula dropped). True: [L_arm8, R_arm8]
+    # (scapula included, grippers dropped). Must match the TrainConfig the checkpoint
+    # was trained with.
+    include_scapula: bool = False
 
     def __call__(self, data: dict) -> dict:
-        idx = list(_GOMA18_TO16)
+        idx = list(_GOMA18_TO16_SCAP if self.include_scapula else _GOMA18_TO16)
 
         state = np.asarray(data["state"])[..., idx]  # [18] -> [16]
         state = transforms.pad_to_dim(state, self.action_dim)
@@ -90,16 +102,26 @@ class ELEYTavlaInputs(transforms.DataTransformFn):
         if "effort" in data:
             inputs["effort"] = np.asarray(data["effort"])[..., idx]
 
-        # Actions only present during training. Concatenate the four controller parts,
-        # dropping the leading scapula axis from each arm, into [..., 16] = [L7, Lg, R7, Rg].
-        action_keys = ("action.left_arm", "action.right_arm", "action.left_gripper", "action.right_gripper")
-        if all(k in data for k in action_keys):
-            left_arm = np.asarray(data["action.left_arm"])[..., 1:8]
-            right_arm = np.asarray(data["action.right_arm"])[..., 1:8]
-            left_grip = np.asarray(data["action.left_gripper"])
-            right_grip = np.asarray(data["action.right_gripper"])
-            actions = np.concatenate([left_arm, left_grip, right_arm, right_grip], axis=-1)
-            inputs["actions"] = transforms.pad_to_dim(actions, self.action_dim)
+        # Actions only present during training. Concatenate the controller parts into
+        # [..., 16]: scapula variant keeps the full 8-dim arm commands and skips the
+        # grippers ([L8, R8]); the default drops the leading scapula axis from each arm
+        # and appends the grippers ([L7, Lg, R7, Rg]).
+        if self.include_scapula:
+            action_keys = ("action.left_arm", "action.right_arm")
+            if all(k in data for k in action_keys):
+                left_arm = np.asarray(data["action.left_arm"])[..., 0:8]
+                right_arm = np.asarray(data["action.right_arm"])[..., 0:8]
+                actions = np.concatenate([left_arm, right_arm], axis=-1)
+                inputs["actions"] = transforms.pad_to_dim(actions, self.action_dim)
+        else:
+            action_keys = ("action.left_arm", "action.right_arm", "action.left_gripper", "action.right_gripper")
+            if all(k in data for k in action_keys):
+                left_arm = np.asarray(data["action.left_arm"])[..., 1:8]
+                right_arm = np.asarray(data["action.right_arm"])[..., 1:8]
+                left_grip = np.asarray(data["action.left_gripper"])
+                right_grip = np.asarray(data["action.right_gripper"])
+                actions = np.concatenate([left_arm, left_grip, right_arm, right_grip], axis=-1)
+                inputs["actions"] = transforms.pad_to_dim(actions, self.action_dim)
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
