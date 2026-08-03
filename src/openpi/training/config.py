@@ -947,6 +947,24 @@ _CONFIGS = [
     # rebake config/{robot_model,pipeline}/eley_tavla_unilateral.yaml.
     #
     TrainConfig(
+        name="pi0_eley_tavla_baseline",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            effort_history=(),
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi0_eley_tavla_effort",
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT, effort_dim=16),
         data=LeRobotEleyTavlaDataConfig(
@@ -967,6 +985,42 @@ _CONFIGS = [
     TrainConfig(
         name="pi0_eley_tavla_effort_history",
         model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            effort_history=tuple((4*i-36 for i in range(10))),  # sample 10 frames in 2s
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_fut",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_FUT, effort_dim=16),
+        data=LeRobotEleyTavlaDataConfig(
+            repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
+            effort_history=(0,),  # input token is not built for EXPERT_FUT; futures are appended by the data loader
+            default_prompt="do something",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_eley_tavla_effort_history_fut",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", effort_type=EffortType.EXPERT_HIS_C_FUT, effort_dim=16),
         data=LeRobotEleyTavlaDataConfig(
             repo_id="lerobot_datasets/lerobot_eley_tavla_unilateral",
             effort_history=tuple((4*i-36 for i in range(10))),  # sample 10 frames in 2s

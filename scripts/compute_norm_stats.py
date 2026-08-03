@@ -75,7 +75,7 @@ def main(config_name: str, max_frames: int | None = None):
             local_batch_size=8,
             num_workers=8,
             shuffle=shuffle,
-            num_batches=num_frames,
+            num_batches=num_frames // 8,
         )
 
         keys = ["state", "actions"]
@@ -83,9 +83,9 @@ def main(config_name: str, max_frames: int | None = None):
             keys.append("effort")
         stats = {key: normalize.RunningStats() for key in keys}
 
-        for batch in tqdm.tqdm(data_loader, total=num_frames, desc="Computing stats"):
+        for batch in tqdm.tqdm(data_loader, total=num_frames // 8, desc="Computing stats"):
             for key in keys:
-                values = np.asarray(batch[key][0])
+                values = np.asarray(batch[key])
                 stats[key].update(values.reshape(-1, values.shape[-1]))
 
         norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
